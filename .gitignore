@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.DS_Store
+data/reports/
+clients/flutter_smoke/.dart_tool/
+clients/flutter_smoke/build/
+clients/flutter_smoke/.flutter-plugins*
+clients/flutter_smoke/pubspec.lock

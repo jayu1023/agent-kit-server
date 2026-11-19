@@ -1,0 +1,15 @@
+# web
+fastapi==0.165.0
+uvicorn[standard]==0.34.0
+pydantic==2.12.5
+pydantic-settings==2.7.0
+
+# agent
+langgraph==1.2.23
+langchain-core==1.8.3
+
+# mcp (2.x: FastMCP was renamed MCPServer)
+mcp==2.3.0
+
+# llm planner (optional at runtime — heuristic planner needs no key)
+openai==1.59.3

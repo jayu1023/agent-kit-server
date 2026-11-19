@@ -1,0 +1,19 @@
+# One service. There is no datastore here on purpose: run state lives in the
+# in-process MemorySaver checkpointer, which is also why this scales to exactly
+# one replica. Swapping in the Postgres checkpointer is what adds a database —
+# see "Honest status" in the README.
+services:
+  api:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+      PLANNER: ${PLANNER:-heuristic}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      PLANNER_MODEL: ${PLANNER_MODEL:-gpt-4o-mini}
+      SEARCH_PROVIDER: ${SEARCH_PROVIDER:-offline}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      MAX_STEPS: ${MAX_STEPS:-8}
+      TOOL_TIMEOUT_S: ${TOOL_TIMEOUT_S:-10.0}
+      TOOL_RETRIES: ${TOOL_RETRIES:-2}
+    restart: unless-stopped

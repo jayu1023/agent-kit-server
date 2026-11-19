@@ -1,0 +1,16 @@
+name: flutter_smoke
+description: Wire-compatibility check — decodes agent-kit-server frames with the real agent_kit models.
+publish_to: none
+version: 0.1.0
+
+environment:
+  sdk: ">=3.5.0 <4.0.0"
+
+dependencies:
+  agent_kit: ^0.1.0
+  flutter:
+    sdk: flutter
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
