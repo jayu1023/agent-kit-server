@@ -308,11 +308,19 @@ agent.answer               0.01ms   0.2%                      successes=3 failur
 
 ### On LangSmith
 
-`TRACE_EXPORTER=otlp` pointed at LangSmith's OTLP endpoint with an `Authorization` header
-works, and the config is in `.env.example`. **That path is implemented and has never been
-executed** — no LangSmith key was used in this repo. This makes *OpenTelemetry, tracing and
-observability* defensible; it does **not** make *LangSmith* defensible, and that should not
-go on a CV off the back of this repo.
+`TRACE_EXPORTER=otlp` pointed at LangSmith's OTLP endpoint with an `x-api-key` header, with
+the config in `.env.example`.
+
+The identical exporter path **was verified in the sibling
+[`rag-service`](https://github.com/jayu1023/rag-service) repo** — `make langsmith` there
+emits a trace and inspects the export result, and it returned `PASS: 2/2 export(s)
+accepted (HTTP 2xx)` on 2026-11-20. `app/tracing.py` is the same module in both repos, so
+the OTLP wiring is shared and proven.
+
+**What has not been done here:** that check has not been run against *this* service's
+spans, so no `agent.*` or `tool.*` span has been seen by a LangSmith collector. The
+exporter is the same; the specific run is not. Point `TRACE_EXPORTER=otlp` with a key at
+it and the agent traces go to LangSmith — expected to work, not yet demonstrated.
 
 ---
 
