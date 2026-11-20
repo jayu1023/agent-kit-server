@@ -13,3 +13,8 @@ mcp==2.3.0
 
 # llm planner (optional at runtime — heuristic planner needs no key)
 openai==1.59.3
+
+# tracing (opt-in: TRACE_EXPORTER=none by default)
+opentelemetry-api==1.45.2
+opentelemetry-sdk==1.45.2
+opentelemetry-exporter-otlp-proto-http==1.45.2

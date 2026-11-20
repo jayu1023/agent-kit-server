@@ -52,6 +52,7 @@ from .guards import run_tool
 from .planner import make_plan, resolve_args
 from .state import AgentState, set_step_state
 from .tools import TOOLS_BY_NAME, is_write_tool
+from .tracing import set_attributes, span
 
 
 def _emit(payload: dict[str, Any]) -> None:
@@ -87,7 +88,14 @@ def _call_id(config: RunnableConfig, step_id: str, tool: str) -> str:
 # --------------------------------------------------------------------------- #
 def plan(state: AgentState) -> dict[str, Any]:
     question = state["question"]
-    steps, actions, planner_used = make_plan(question)
+    with span("agent.plan", **{"agent.question_chars": len(question)}) as plan_span:
+        steps, actions, planner_used = make_plan(question)
+        set_attributes(
+            plan_span,
+            **{"agent.planner": planner_used,
+               "agent.steps": len(steps),
+               "agent.tools": ",".join(a["tool"] for a in actions)},
+        )
 
     _emit(thinking_event(f"Planning with the {planner_used} planner…"))
     _emit(plan_event(steps))
@@ -113,11 +121,32 @@ def act(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
     plan_wire = set_step_state(state["plan"], step_id, PlanStepState.running.value)
     _emit(plan_event([_as_step(s) for s in plan_wire]))
 
+    # Managed by hand rather than with `with`, because interrupt() unwinds the
+    # stack from the middle of this function and a context manager would have
+    # its __exit__ skipped. `closed` guards against the double-close that
+    # produced "Setting attribute on ended span" warnings on the resume pass.
+    act_span_cm = span(
+        "agent.act",
+        **{"agent.step_id": step_id, "agent.tool": tool_name,
+           "agent.requires_approval": is_write_tool(tool_name)},
+    )
+    act_span = act_span_cm.__enter__()
+    closed = False
+
+    def close_act(**attributes: Any) -> None:
+        nonlocal closed
+        if closed:
+            return
+        set_attributes(act_span, **attributes)
+        act_span_cm.__exit__(None, None, None)
+        closed = True
+
     try:
         args = resolve_args(action, state["question"], list(state.get("observations", [])))
     except Exception as exc:
         # A resolver failure is this step's failure, not the run's. reflect()
         # decides whether the answer is still worth producing.
+        close_act(**{"agent.outcome": "arg_resolution_failed"})
         _emit(
             tool_call_event(
                 ToolCall(
@@ -163,6 +192,7 @@ def act(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         )
         # Execution stops here. The checkpointer persists state; the process may
         # even restart. `POST /runs/{id}/approve` resumes with Command(resume=...).
+        close_act(**{"agent.outcome": "awaiting_approval"})
         decision = interrupt(
             {
                 "kind": "approval_required",
@@ -172,7 +202,16 @@ def act(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
                 "reason": "This tool writes to disk.",
             }
         )
+        # The run resumes here in a NEW process span: interrupt() unwinds the
+        # stack, so the span opened before it cannot survive. This is why
+        # approval shows as two traces, not one -- which is honest, because it
+        # genuinely is two executions of this node.
         approved = bool(decision.get("approved")) if isinstance(decision, dict) else bool(decision)
+        with span(
+            "agent.approval",
+            **{"agent.step_id": step_id, "agent.tool": tool_name, "agent.approved": approved},
+        ):
+            pass
         if not approved:
             note = (decision or {}).get("note", "") if isinstance(decision, dict) else ""
             _emit(
@@ -186,6 +225,7 @@ def act(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
                     )
                 )
             )
+            close_act(**{"agent.outcome": "rejected"})
             return {
                 "plan": set_step_state(plan_wire, step_id, PlanStepState.skipped.value),
                 "resolved_args": None,
@@ -213,6 +253,7 @@ def act(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
             )
         )
     )
+    close_act(**{"agent.outcome": "ready"})
     return {"plan": plan_wire, "resolved_args": args}
 
 
@@ -228,13 +269,25 @@ async def observe(state: AgentState, config: RunnableConfig) -> dict[str, Any]:
         return {"steps_taken": state.get("steps_taken", 0) + 1}
 
     cfg = settings()
-    outcome = await run_tool(
-        TOOLS_BY_NAME[tool_name],
-        args,
-        timeout_s=cfg.tool_timeout_s,
-        retries=cfg.tool_retries,
-        backoff_s=cfg.retry_backoff_s,
-    )
+    with span(
+        f"tool.{tool_name}",
+        **{"tool.name": tool_name, "tool.timeout_s": cfg.tool_timeout_s,
+           "tool.max_retries": cfg.tool_retries},
+    ) as tool_span:
+        outcome = await run_tool(
+            TOOLS_BY_NAME[tool_name],
+            args,
+            timeout_s=cfg.tool_timeout_s,
+            retries=cfg.tool_retries,
+            backoff_s=cfg.retry_backoff_s,
+        )
+        # `attempts` is the attribute worth having: it is the only place a
+        # silent retry becomes visible after the fact.
+        set_attributes(
+            tool_span,
+            **{"tool.ok": outcome.ok, "tool.attempts": outcome.attempts,
+               "tool.duration_ms": outcome.duration_ms, "tool.error": outcome.error},
+        )
 
     _emit(
         tool_call_event(
@@ -295,6 +348,14 @@ def reflect(state: AgentState) -> dict[str, Any]:
     total = len(state.get("actions", []))
     observations = list(state.get("observations", []))
 
+    with span(
+        "agent.reflect",
+        **{"agent.steps_taken": taken, "agent.total_steps": total,
+           "agent.failed_steps": sum(1 for o in observations if not o["ok"]),
+           "agent.budget": settings().max_steps},
+    ):
+        pass
+
     if taken >= settings().max_steps:
         _emit(
             thinking_event(
@@ -328,6 +389,12 @@ def answer(state: AgentState) -> dict[str, Any]:
     observations = list(state.get("observations", []))
     successes = [o for o in observations if o["ok"]]
     failures = [o for o in observations if not o["ok"]]
+    answer_span_cm = span(
+        "agent.answer",
+        **{"agent.successes": len(successes), "agent.failures": len(failures),
+           "agent.halt_reason": state.get("halt_reason", "completed")},
+    )
+    answer_span_cm.__enter__()
 
     lines: list[str] = []
     for obs in successes:
@@ -358,6 +425,7 @@ def answer(state: AgentState) -> dict[str, Any]:
 
     text = "\n\n".join([body, *footer]) if footer else body
     _emit(thinking_event("Composing the final answer.", is_streaming=False))
+    answer_span_cm.__exit__(None, None, None)
     return {"answer": text, "halt_reason": halt}
 
 

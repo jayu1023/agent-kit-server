@@ -19,6 +19,7 @@ is the whole setup.
 
 **Docs:** [`docs/EXPLAINER.md`](docs/EXPLAINER.md) — how each piece works and why.
 [`docs/INTERVIEW_GUIDE.md`](docs/INTERVIEW_GUIDE.md) — how to present and defend it.
+[`docs/TRACE.md`](docs/TRACE.md) — real captured span trees, including the approval pause.
 
 ---
 
@@ -67,6 +68,8 @@ is the whole setup.
 | `app/tools/` | `web_search`, `query_tickets`, `calculator`, `save_report` |
 | `app/main.py` | `POST /runs` (SSE), `POST /runs/{id}/approve`, `GET /runs/{id}`, `/tools`, `/health` |
 | `mcp_server.py` | the same tool objects over MCP stdio — no duplicated definitions |
+| `app/tracing.py` | OpenTelemetry spans; file / OTLP exporters, off by default |
+| `app/trace_tree.py` | renders a JSONL trace as the span trees in `docs/TRACE.md` |
 | `clients/flutter_smoke/` | Dart tests that decode real server output with the real package |
 
 ---
@@ -238,6 +241,81 @@ from the real server is what makes it prove anything.
 
 ---
 
+## Tracing
+
+```bash
+make trace     # two traced runs, rendered as span trees -> docs/TRACE.md
+```
+
+OpenTelemetry, **off by default** (`TRACE_EXPORTER=none`) — the no-op tracer makes every
+`with span(...)` free, which is why no node needs an `if tracing_enabled` guard. Set
+`file` for a JSONL span log you can render, or `otlp` to ship to any collector.
+
+A rendered tree rather than a screenshot, deliberately: it is diffable, it needs no image
+host, and anyone can regenerate it and check it matches. For an agent this tree *is* the
+artifact — "why did that run take nine seconds and call search twice" is answered by the
+shape of the traversal, not by reading interleaved logs.
+
+```
+Run 1 — read-only (search -> SQL -> calculator), no approval needed
+
+agent.plan                 0.42ms   6.2% █                    planner=heuristic steps=3 tools=web_search,query_tickets,calculator
+agent.act                  0.02ms   0.3%                      step_id=s1 tool=web_search requires_approval=False outcome=ready
+tool.web_search            1.30ms  19.2% ████                 ok=True attempts=1
+agent.reflect              0.01ms   0.1%                      steps_taken=1 total_steps=3 failed_steps=0 budget=8
+agent.act                  0.01ms   0.1%                      step_id=s2 tool=query_tickets requires_approval=False outcome=ready
+tool.query_tickets         0.53ms   7.8% ██                   ok=True attempts=1
+agent.reflect              0.01ms   0.1%                      steps_taken=2 total_steps=3 failed_steps=0 budget=8
+agent.act                  0.02ms   0.3%                      step_id=s3 tool=calculator requires_approval=False outcome=ready
+tool.calculator            0.21ms   3.1% █                    ok=True attempts=1
+agent.reflect              0.01ms   0.1%                      steps_taken=3 total_steps=3 failed_steps=0 budget=8
+agent.answer               0.01ms   0.1%                      successes=3 failures=0 halt_reason=completed
+
+11 spans, 6.78ms wall clock
+
+Run 2 — write action: pauses for approval, then resumes
+
+agent.plan                 0.02ms   0.3%                      planner=heuristic steps=3 tools=web_search,query_tickets,save_report
+agent.act                  0.01ms   0.2%                      step_id=s1 tool=web_search requires_approval=False outcome=ready
+tool.web_search            0.48ms   7.7% ██                   ok=True attempts=1
+agent.reflect              0.01ms   0.2%                      steps_taken=1 total_steps=3 failed_steps=0 budget=8
+agent.act                  0.08ms   1.3%                      step_id=s2 tool=query_tickets requires_approval=False outcome=ready
+tool.query_tickets         0.20ms   3.2% █                    ok=True attempts=1
+agent.reflect              0.01ms   0.2%                      steps_taken=2 total_steps=3 failed_steps=0 budget=8
+agent.act                  0.02ms   0.3%                      step_id=s3 tool=save_report requires_approval=True outcome=awaiting_approval
+agent.act                  0.02ms   0.3%                      step_id=s3 tool=save_report requires_approval=True outcome=awaiting_approval
+agent.approval             0.01ms   0.2%                      step_id=s3 tool=save_report approved=True
+tool.save_report           0.50ms   8.1% ██                   ok=True attempts=1
+agent.reflect              0.01ms   0.2%                      steps_taken=3 total_steps=3 failed_steps=0 budget=8
+agent.answer               0.01ms   0.2%                      successes=3 failures=0 halt_reason=completed
+
+13 spans, 6.21ms wall clock
+```
+
+**Three things worth reading off that output:**
+
+- **The budget is visible on every hop.** `agent.reflect` carries
+  `steps_taken=2 total_steps=3 budget=8`, so a run that halted early tells you *why* from
+  the trace rather than from a log line you have to go find.
+- **Retries are visible after the fact.** `tool.* attempts=1` is the only place a silent
+  retry shows up once the request is over. An `attempts=3` on a tool that still returned
+  `ok=True` is the signature of a flaky dependency that no error log would catch.
+- **The approval pause appears as two `agent.act` spans, both `awaiting_approval`.** That
+  is not a bug in the instrumentation — it is the LangGraph semantics being honest.
+  `interrupt()` unwinds the stack, so the node genuinely re-executes from the top on
+  resume, and the trace shows two executions because there were two. It is the same
+  property that forces everything before `interrupt()` to be idempotent.
+
+### On LangSmith
+
+`TRACE_EXPORTER=otlp` pointed at LangSmith's OTLP endpoint with an `Authorization` header
+works, and the config is in `.env.example`. **That path is implemented and has never been
+executed** — no LangSmith key was used in this repo. This makes *OpenTelemetry, tracing and
+observability* defensible; it does **not** make *LangSmith* defensible, and that should not
+go on a CV off the back of this repo.
+
+---
+
 ## Tests
 
 ```
@@ -313,6 +391,8 @@ A working reference implementation with a tested protocol contract. Specifically
   replica. The Postgres checkpointer is the fix and is a config change, not a
   redesign.
 - **No auth, no rate limiting, no multi-tenancy, no per-user tool permissions.**
+- **Tracing has only been exercised with the file exporter.** The OTLP path (and therefore
+  the LangSmith path) is implemented and unrun — no collector and no key were used.
 - **No screen recording of the Flutter UI.** The wire contract is tested against
   the real package, which is the part that can actually break; a GIF of widgets
   rendering is not evidence of anything the tests do not already cover.

@@ -1,7 +1,7 @@
 VENV ?= .venv
 PY   := $(VENV)/bin/python
 
-.PHONY: help venv install dev test test-dart fixture mcp ask approve up down clean
+.PHONY: help venv install dev test test-dart fixture trace mcp ask approve up down clean
 
 help:
 	@grep -E '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/' | expand -t26
@@ -24,6 +24,9 @@ fixture: ## regenerate the Dart wire fixture from a real agent run
 test-dart: fixture ## prove wire compatibility against the real agent_kit package
 	cd clients/flutter_smoke && flutter test
 
+trace: ## run two traced agent runs and render the span trees (writes docs/TRACE.md)
+	TRACE_EXPORTER=file $(PY) -m app.trace_tree --demo --write
+
 mcp: ## run the MCP server on stdio (for Claude Code / Desktop)
 	$(PY) mcp_server.py
 
@@ -44,4 +47,4 @@ down:
 	docker compose down -v
 
 clean:
-	rm -rf .pytest_cache data/reports clients/flutter_smoke/.dart_tool
+	rm -rf .pytest_cache data/reports data/trace.jsonl clients/flutter_smoke/.dart_tool

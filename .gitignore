@@ -9,3 +9,4 @@ clients/flutter_smoke/.dart_tool/
 clients/flutter_smoke/build/
 clients/flutter_smoke/.flutter-plugins*
 clients/flutter_smoke/pubspec.lock
+data/trace.jsonl
