@@ -154,3 +154,74 @@ def test_run_ids_are_generated_when_not_supplied(client):
     response = client.post("/runs", json={"question": "What is the Sev-3 target?"})
     assert response.headers["x-run-id"]
     assert control_frames(frames(response))[0]["run_id"] == response.headers["x-run-id"]
+
+
+# --------------------------------------------------------------------------- #
+# supervisor mode over HTTP
+# --------------------------------------------------------------------------- #
+def test_specialists_endpoint_publishes_the_roster(client):
+    by_name = {s["name"]: s for s in client.get("/specialists").json()["specialists"]}
+    assert set(by_name) == {"researcher", "analyst", "scribe"}
+    assert by_name["scribe"]["can_write"] is True
+    assert by_name["analyst"]["can_write"] is False
+    assert by_name["researcher"]["tools"] == ["web_search"]
+
+
+def test_health_advertises_both_modes(client):
+    body = client.get("/health").json()
+    assert body["modes"] == ["single", "supervisor"]
+    assert body["specialists"] == ["researcher", "analyst", "scribe"]
+
+
+def test_an_unknown_mode_is_rejected(client):
+    assert client.post("/runs", json={"question": "x", "mode": "swarm"}).status_code == 422
+
+
+def test_supervisor_mode_runs_only_the_routed_specialists_tools(client):
+    response = client.post(
+        "/runs",
+        json={
+            "question": "How does average first response compare across plans?",
+            "run_id": "api-sup",
+            "mode": "supervisor",
+        },
+    )
+    called = {
+        f["data"]["name"] for f in agent_frames(frames(response)) if f["type"] == "tool_call"
+    }
+    assert called == {"query_tickets", "calculator"}
+    assert "web_search" not in called
+
+
+def test_the_run_reports_its_mode_and_roster(client):
+    body = client.get("/runs/api-sup").json()
+    assert body["mode"] == "supervisor"
+    assert body["roster"] == ["analyst"]
+
+
+def test_single_mode_is_the_default(client):
+    response = client.post("/runs", json={"question": "What is the Sev-1 target?", "run_id": "api-def"})
+    assert control_frames(frames(response))[0]["mode"] == "single"
+    assert client.get("/runs/api-def").json()["mode"] == "single"
+
+
+def test_approve_resumes_the_supervisor_graph_not_the_single_agent(client):
+    """Both graphs share a checkpointer, so /approve has to resume the right
+    one. Resuming the wrong graph is a 409, which is how this would fail."""
+    client.post(
+        "/runs",
+        json={
+            "question": "What is our CSAT by plan and save a report about it",
+            "run_id": "api-sup-hitl",
+            "mode": "supervisor",
+        },
+    )
+    assert client.get("/runs/api-sup-hitl").json()["awaiting_approval"]
+
+    response = client.post("/runs/api-sup-hitl/approve", json={"approved": True})
+    assert response.status_code == 200
+    saves = [
+        f["data"] for f in agent_frames(frames(response))
+        if f["type"] == "tool_call" and f["data"]["name"] == "save_report"
+    ]
+    assert saves[-1]["state"] == "success"

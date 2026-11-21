@@ -6,35 +6,35 @@ Regenerate and diff to check these are current.
 ```
 Run 1 — read-only (search -> SQL -> calculator), no approval needed
 
-agent.plan                 0.42ms   6.2% █                    planner=heuristic steps=3 tools=web_search,query_tickets,calculator
-agent.act                  0.02ms   0.3%                      step_id=s1 tool=web_search requires_approval=False outcome=ready
-tool.web_search            1.30ms  19.2% ████                 ok=True attempts=1
-agent.reflect              0.01ms   0.1%                      steps_taken=1 total_steps=3 failed_steps=0 budget=8
-agent.act                  0.01ms   0.1%                      step_id=s2 tool=query_tickets requires_approval=False outcome=ready
-tool.query_tickets         0.53ms   7.8% ██                   ok=True attempts=1
-agent.reflect              0.01ms   0.1%                      steps_taken=2 total_steps=3 failed_steps=0 budget=8
-agent.act                  0.02ms   0.3%                      step_id=s3 tool=calculator requires_approval=False outcome=ready
-tool.calculator            0.21ms   3.1% █                    ok=True attempts=1
-agent.reflect              0.01ms   0.1%                      steps_taken=3 total_steps=3 failed_steps=0 budget=8
-agent.answer               0.01ms   0.1%                      successes=3 failures=0 halt_reason=completed
+agent.plan                 1.27ms   5.3% █                    planner=heuristic steps=3 tools=web_search,query_tickets,calculator
+agent.act                  0.11ms   0.5%                      step_id=s1 tool=web_search requires_approval=False outcome=ready
+tool.web_search            9.44ms  39.7% ████████             ok=True attempts=1
+agent.reflect              0.01ms   0.0%                      steps_taken=1 total_steps=3 failed_steps=0 budget=8
+agent.act                  0.02ms   0.1%                      step_id=s2 tool=query_tickets requires_approval=False outcome=ready
+tool.query_tickets         4.99ms  21.0% ████                 ok=True attempts=1
+agent.reflect              0.01ms   0.0%                      steps_taken=2 total_steps=3 failed_steps=0 budget=8
+agent.act                  0.03ms   0.1%                      step_id=s3 tool=calculator requires_approval=False outcome=ready
+tool.calculator            0.26ms   1.1%                      ok=True attempts=1
+agent.reflect              0.01ms   0.0%                      steps_taken=3 total_steps=3 failed_steps=0 budget=8
+agent.answer               0.01ms   0.0%                      successes=3 failures=0 halt_reason=completed
 
-11 spans, 6.78ms wall clock
+11 spans, 23.76ms wall clock
 
 Run 2 — write action: pauses for approval, then resumes
 
-agent.plan                 0.02ms   0.3%                      planner=heuristic steps=3 tools=web_search,query_tickets,save_report
-agent.act                  0.01ms   0.2%                      step_id=s1 tool=web_search requires_approval=False outcome=ready
-tool.web_search            0.48ms   7.7% ██                   ok=True attempts=1
-agent.reflect              0.01ms   0.2%                      steps_taken=1 total_steps=3 failed_steps=0 budget=8
-agent.act                  0.08ms   1.3%                      step_id=s2 tool=query_tickets requires_approval=False outcome=ready
-tool.query_tickets         0.20ms   3.2% █                    ok=True attempts=1
-agent.reflect              0.01ms   0.2%                      steps_taken=2 total_steps=3 failed_steps=0 budget=8
-agent.act                  0.02ms   0.3%                      step_id=s3 tool=save_report requires_approval=True outcome=awaiting_approval
-agent.act                  0.02ms   0.3%                      step_id=s3 tool=save_report requires_approval=True outcome=awaiting_approval
-agent.approval             0.01ms   0.2%                      step_id=s3 tool=save_report approved=True
-tool.save_report           0.50ms   8.1% ██                   ok=True attempts=1
-agent.reflect              0.01ms   0.2%                      steps_taken=3 total_steps=3 failed_steps=0 budget=8
-agent.answer               0.01ms   0.2%                      successes=3 failures=0 halt_reason=completed
+agent.plan                 0.03ms   0.3%                      planner=heuristic steps=3 tools=web_search,query_tickets,save_report
+agent.act                  0.03ms   0.3%                      step_id=s1 tool=web_search requires_approval=False outcome=ready
+tool.web_search            0.59ms   5.9% █                    ok=True attempts=1
+agent.reflect              0.01ms   0.1%                      steps_taken=1 total_steps=3 failed_steps=0 budget=8
+agent.act                  0.09ms   0.9%                      step_id=s2 tool=query_tickets requires_approval=False outcome=ready
+tool.query_tickets         0.25ms   2.5%                      ok=True attempts=1
+agent.reflect              0.01ms   0.1%                      steps_taken=2 total_steps=3 failed_steps=0 budget=8
+agent.act                  0.02ms   0.2%                      step_id=s3 tool=save_report requires_approval=True outcome=awaiting_approval
+agent.act                  0.03ms   0.3%                      step_id=s3 tool=save_report requires_approval=True outcome=awaiting_approval
+agent.approval             0.01ms   0.1%                      step_id=s3 tool=save_report approved=True
+tool.save_report           1.67ms  16.7% ███                  ok=True attempts=1
+agent.reflect              0.01ms   0.1%                      steps_taken=3 total_steps=3 failed_steps=0 budget=8
+agent.answer               0.02ms   0.2%                      successes=3 failures=0 halt_reason=completed
 
-13 spans, 6.21ms wall clock
+13 spans, 10.02ms wall clock
 ```

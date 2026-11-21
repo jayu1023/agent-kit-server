@@ -26,7 +26,7 @@ import asyncio
 import logging
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Literal
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
@@ -37,6 +37,8 @@ from pydantic import BaseModel, Field
 from .config import settings
 from .events import control_event, sse
 from .graph import build_graph
+from .specialists import SPECIALISTS
+from .supervisor import build_supervisor_graph
 from .tools import tool_schemas
 
 log = logging.getLogger("agent")
@@ -46,6 +48,15 @@ log = logging.getLogger("agent")
 # checkpointer when runs have to outlive the process or scale past one worker.
 CHECKPOINTER = MemorySaver()
 GRAPH = build_graph(CHECKPOINTER)
+
+# The multi-agent graph shares the checkpointer, so a run of either mode is
+# addressable and resumable by the same thread_id and the approve endpoint does
+# not need to know which one it is resuming.
+SUPERVISOR_GRAPH = build_supervisor_graph(CHECKPOINTER)
+
+#: Which graph a run used, so /approve resumes the right one. Lives beside the
+#: checkpointer and shares its lifetime; see the MemorySaver note above.
+RUN_MODE: dict[str, str] = {}
 
 
 @asynccontextmanager
@@ -60,6 +71,14 @@ app = FastAPI(title="agent_kit_server", version="0.1.0", lifespan=lifespan)
 class RunRequest(BaseModel):
     question: str = Field(min_length=1, max_length=2000)
     run_id: str | None = Field(default=None, description="Supply one to make the run addressable.")
+    mode: Literal["single", "supervisor"] = Field(
+        default="single",
+        description=(
+            "single     = one agent, all four tools (the default; right answer for most tasks). "
+            "supervisor = route to specialist agents with restricted tool sets and "
+            "per-specialist step budgets."
+        ),
+    )
 
 
 class ApproveRequest(BaseModel):
@@ -71,6 +90,10 @@ def _config(run_id: str) -> dict[str, Any]:
     return {"configurable": {"thread_id": run_id}}
 
 
+def _graph_for(run_id: str):
+    return SUPERVISOR_GRAPH if RUN_MODE.get(run_id) == "supervisor" else GRAPH
+
+
 async def _stream(run_id: str, payload: Any) -> AsyncIterator[str]:
     """Translate the graph's event stream into SSE frames.
 
@@ -79,9 +102,13 @@ async def _stream(run_id: str, payload: Any) -> AsyncIterator[str]:
     LangGraph reports `__interrupt__`. Without `updates`, a paused run would
     look to the client like a stream that just stopped.
     """
-    yield sse(control_event("run_started", run_id=run_id), event="control")
+    graph = _graph_for(run_id)
+    yield sse(
+        control_event("run_started", run_id=run_id, mode=RUN_MODE.get(run_id, "single")),
+        event="control",
+    )
     try:
-        async for mode, chunk in GRAPH.astream(
+        async for mode, chunk in graph.astream(
             payload, config=_config(run_id), stream_mode=["custom", "updates"]
         ):
             if mode == "custom":
@@ -100,7 +127,7 @@ async def _stream(run_id: str, payload: Any) -> AsyncIterator[str]:
                     )
                     return
 
-        state = await GRAPH.aget_state(_config(run_id))
+        state = await graph.aget_state(_config(run_id))
         yield sse(
             control_event(
                 "done",
@@ -128,6 +155,7 @@ SSE_HEADERS = {"Cache-Control": "no-cache", "Connection": "keep-alive", "X-Accel
 @app.post("/runs")
 async def start_run(req: RunRequest):
     run_id = req.run_id or uuid.uuid4().hex[:12]
+    RUN_MODE[run_id] = req.mode
     return StreamingResponse(
         _stream(run_id, {"question": req.question}),
         media_type="text/event-stream",
@@ -137,7 +165,7 @@ async def start_run(req: RunRequest):
 
 @app.post("/runs/{run_id}/approve")
 async def approve(run_id: str, req: ApproveRequest):
-    state = await GRAPH.aget_state(_config(run_id))
+    state = await _graph_for(run_id).aget_state(_config(run_id))
     if not state.created_at:
         raise HTTPException(status_code=404, detail=f"no run {run_id}")
     if not state.interrupts:
@@ -152,12 +180,14 @@ async def approve(run_id: str, req: ApproveRequest):
 
 @app.get("/runs/{run_id}")
 async def get_run(run_id: str):
-    state = await GRAPH.aget_state(_config(run_id))
+    state = await _graph_for(run_id).aget_state(_config(run_id))
     if not state.created_at:
         raise HTTPException(status_code=404, detail=f"no run {run_id}")
     values = state.values
     return {
         "run_id": run_id,
+        "mode": RUN_MODE.get(run_id, "single"),
+        "roster": values.get("roster", []),
         "question": values.get("question"),
         "plan": values.get("plan", []),
         "answer": values.get("answer"),
@@ -173,6 +203,23 @@ def tools():
     return {"tools": tool_schemas()}
 
 
+@app.get("/specialists")
+def specialists():
+    """The supervisor's roster: who exists, what each may call, and its budget."""
+    return {
+        "specialists": [
+            {
+                "name": s.name,
+                "description": s.description,
+                "tools": list(s.tools),
+                "max_steps": s.max_steps,
+                "can_write": s.can_write,
+            }
+            for s in SPECIALISTS
+        ]
+    }
+
+
 @app.get("/health")
 def health():
     cfg = settings()
@@ -183,4 +230,6 @@ def health():
         "max_steps": cfg.max_steps,
         "tool_timeout_s": cfg.tool_timeout_s,
         "tools": [t["name"] for t in tool_schemas()],
+        "modes": ["single", "supervisor"],
+        "specialists": [s.name for s in SPECIALISTS],
     }

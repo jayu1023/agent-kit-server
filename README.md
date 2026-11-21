@@ -63,7 +63,9 @@ is the whole setup.
 | `app/events.py` | the `agent_kit` wire protocol — the **only** module that knows the Dart shapes |
 | `app/state.py` | the graph's state; what survives the approval round-trip |
 | `app/planner.py` | heuristic + LLM planners, the tool allowlist, late-binding resolvers |
-| `app/graph.py` | the four nodes, the interrupt, the loop guard |
+| `app/graph.py` | the four nodes, the interrupt, the loop guard (`single` mode) |
+| `app/specialists.py` | specialist definitions: tool sets, budgets, dispatch order |
+| `app/supervisor.py` | the multi-agent graph: route → dispatch → synthesize |
 | `app/guards.py` | tool timeout, bounded retry, the permanent/transient split |
 | `app/tools/` | `web_search`, `query_tickets`, `calculator`, `save_report` |
 | `app/main.py` | `POST /runs` (SSE), `POST /runs/{id}/approve`, `GET /runs/{id}`, `/tools`, `/health` |
@@ -78,7 +80,7 @@ is the whole setup.
 
 ```bash
 make venv install
-make test                    # 94 python tests
+make test                    # 132 python tests
 make test-dart               # regenerate the fixture, then 8 Dart wire tests
 
 make dev                     # uvicorn on :8000
@@ -241,6 +243,69 @@ from the real server is what makes it prove anything.
 
 ---
 
+## Two modes: one agent, or a supervisor routing to specialists
+
+```bash
+curl -X POST :8000/runs -d '{"question":"...","mode":"supervisor"}'
+curl :8000/specialists
+```
+
+`single` is the default and is the right answer for most tasks. `supervisor`
+routes to specialist agents:
+
+| Specialist | Tools | Budget | Writes |
+|---|---|---|---|
+| `researcher` | `web_search` | 2 steps | no |
+| `analyst` | `query_tickets`, `calculator` | 3 steps | no |
+| `scribe` | `save_report` | 1 step | **yes — approval required** |
+
+```
+route -> dispatch(specialist) -> [more specialists] -> synthesize
+```
+
+### What makes this multi-agent rather than one agent with a label
+
+Three things, and the third is the one usually missing:
+
+1. **Restricted tool sets.** The analyst cannot write; the scribe cannot query. A test
+   asserts the sets are strict subsets *and* that they do not overlap — overlap would mean
+   two agents can do the same job, so routing stops meaning anything and a failure is
+   ambiguous between them.
+2. **Per-specialist step budgets.** A shared budget lets one agent starve the others, which
+   is the classic multi-agent failure. Budgets live on the specialist, not on the run.
+3. **An explicit state contract.** A specialist receives the question and the findings so
+   far, and returns `Finding`s attributed to it. It never sees the supervisor's routing
+   state and cannot edit another specialist's results. An answer you cannot trace back to
+   an agent is a multi-agent system you cannot debug.
+
+Capability becomes a property of *who was dispatched* — decidable before anything runs and
+visible in the plan the UI renders — rather than a property of the current step.
+
+### When to use which
+
+**Use `single`.** For three or four tools it is less machinery and strictly easier to
+reason about. The supervisor exists here because the tool sets genuinely differ in blast
+radius — one of them writes — and because routing lets a policy question skip the SQL path
+entirely.
+
+Scaling up the number of agents is not free: every handoff is a place for the state
+contract to be violated, and a supervisor that routes badly is harder to debug than one
+agent that plans badly, because the failure is now split across two decisions.
+
+### Two bugs this surfaced, both now regression-tested
+
+- **A specialist could not see its own earlier findings.** The analyst's calculator step
+  computes from the SQL result it just produced, but LangGraph only commits state when the
+  node returns — so mid-dispatch findings were invisible and the calculator failed every
+  time. In-flight findings are now passed through explicitly.
+- **`Finding` did not satisfy the resolver contract.** The late-binding resolvers are shared
+  with the single agent and read `duration_ms`; omitting it raised `KeyError` during
+  argument resolution — which happens *before* `interrupt()`, so the scribe's approval gate
+  was silently skipped and the write never even asked. A missing key removed a human
+  approval step: worth knowing that is the shape such a bug takes.
+
+---
+
 ## Tracing
 
 ```bash
@@ -327,7 +392,7 @@ it and the agent traces go to LangSmith — expected to work, not yet demonstrat
 ## Tests
 
 ```
-make test        # 94 python tests
+make test        # 132 python tests
 make test-dart   #  8 dart wire-compatibility tests
 ```
 
@@ -354,10 +419,11 @@ What they actually cover, rather than a coverage number:
 ## API
 
 ```bash
-POST /runs                    {"question": "...", "run_id": "optional"}  → SSE
+POST /runs                    {"question": "...", "mode": "single|supervisor"}  → SSE
 POST /runs/{id}/approve       {"approved": true, "note": "..."}          → SSE
 GET  /runs/{id}               plan, answer, halt_reason, awaiting_approval
 GET  /tools                   names, schemas, requires_approval
+GET  /specialists             the supervisor roster: tools, budgets, who can write
 GET  /health
 ```
 
@@ -381,7 +447,7 @@ A working reference implementation with a tested protocol contract. Specifically
 
 - **`docker compose up` is written but has not been run** — no Docker on the
   build machine. The Dockerfile is two-stage and runs as a non-root user; it is
-  unverified. Everything else below was executed: 94 Python tests, 8 Dart tests,
+  unverified. Everything else below was executed: 132 Python tests, 8 Dart tests,
   the MCP server listing and calling tools, and the full approval flow over real
   HTTP against `uvicorn`.
 - **No LLM was used in any verified run.** `PLANNER=llm` is implemented and
@@ -399,6 +465,10 @@ A working reference implementation with a tested protocol contract. Specifically
   replica. The Postgres checkpointer is the fix and is a config change, not a
   redesign.
 - **No auth, no rate limiting, no multi-tenancy, no per-user tool permissions.**
+- **The supervisor's router is keyword-based**, like the single agent's planner, and for
+  the same reason: determinism makes the tests assert exact rosters and lets the demo run
+  with no API key. An LLM router drops in behind the same signature. Specialists also run
+  sequentially — there is no parallel dispatch, and no specialist can call another.
 - **Tracing has only been exercised with the file exporter.** The OTLP path (and therefore
   the LangSmith path) is implemented and unrun — no collector and no key were used.
 - **No screen recording of the Flutter UI.** The wire contract is tested against
@@ -410,6 +480,7 @@ A working reference implementation with a tested protocol contract. Specifically
 - Postgres checkpointer, so paused runs survive a restart and more than one replica
 - Token-level answer streaming (the protocol already has `thinking.is_streaming`)
 - Per-run tool permissions, so approval is policy rather than a hardcoded set
+- Parallel dispatch for independent specialists, with a shared deadline
 - A tool-level eval set: given a question, did it pick the right tool and arguments
 
 ## License
